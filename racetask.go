@@ -54,6 +54,7 @@ type task struct {
 	timeout     time.Duration //default 10 minute
 	timeoutFunc func() (interface{}, error)
 	export      export
+	m           sync.Mutex
 }
 
 // New create task pool with context cancel if job has error
@@ -138,6 +139,9 @@ func (t *task) Run(n ...int) (interface{}, error) {
 		go func(job func(context.Context) (interface{}, error)) {
 			itf, err := job(t.ctx)
 			dones.SetINC()
+			t.m.Lock()
+			defer t.m.Unlock()
+
 			if err == nil || t.errIgnore {
 				t.export = export{
 					err: err,
