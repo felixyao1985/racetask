@@ -28,6 +28,23 @@ type export struct {
 	err error
 }
 
+type SafeNumber struct {
+	val int
+	m   sync.Mutex
+}
+
+func (i *SafeNumber) Get() int {
+	i.m.Lock()
+	defer i.m.Unlock()
+	return i.val
+}
+
+func (i *SafeNumber) SetINC() {
+	i.m.Lock()
+	defer i.m.Unlock()
+	i.val++
+}
+
 type task struct {
 	ctx         context.Context
 	once        sync.Once
@@ -112,21 +129,22 @@ func (t *task) Run(n ...int) (interface{}, error) {
 		return NilResq{}, nil
 	}
 	ret := make(chan export)
-	dones := 0
+	dones := SafeNumber{}
 	onceBody := func() {
 		ret <- t.export
 	}
+
 	for i := 0; i < jl; i++ {
 		go func(job func(context.Context) (interface{}, error)) {
 			itf, err := job(t.ctx)
-			dones++
+			dones.SetINC()
 			if err == nil || t.errIgnore {
 				t.export = export{
 					err: err,
 					itf: itf,
 				}
 				t.once.Do(onceBody)
-			} else if dones == jl {
+			} else if dones.Get() == jl {
 				t.export = export{
 					err: errors.New(TaskError),
 				}
@@ -134,6 +152,7 @@ func (t *task) Run(n ...int) (interface{}, error) {
 			}
 		}(t.jobs[i])
 	}
+
 	select {
 	case r := <-ret:
 		t.cancelFunc()
