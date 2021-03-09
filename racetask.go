@@ -2,7 +2,7 @@ package racetask
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"sync"
 	"time"
 )
@@ -10,11 +10,15 @@ import (
 type NilResq struct {
 }
 
+const TaskError = string("task: err")
+const TimeOutError = string("task: timeout")
+
 type RaceTask interface {
 	Add(...func() (interface{}, error))
 	AddWithCtx(...func(context.Context) (interface{}, error))
 	Run(...int) (interface{}, error)
 	SetTimeOut(time.Duration)
+	SetErrIgnore(bool)
 	TimeOut(func() (interface{}, error))
 	TimeOutWithCtx(func(context.Context) (interface{}, error))
 }
@@ -26,11 +30,13 @@ type export struct {
 
 type task struct {
 	ctx         context.Context
-	errOnce     sync.Once
+	once        sync.Once
+	errIgnore   bool
 	cancelFunc  func()
 	jobs        []func(context.Context) (interface{}, error)
 	timeout     time.Duration //default 10 minute
 	timeoutFunc func() (interface{}, error)
+	export      export
 }
 
 // New create task pool with context cancel if job has error
@@ -47,14 +53,24 @@ func New(ctx context.Context) RaceTask {
 		jobs:       make([]func(context.Context) (interface{}, error), 0),
 		timeout:    time.Minute * 15,
 		timeoutFunc: func() (interface{}, error) {
-			return NilResq{}, nil
+			return NilResq{}, errors.New(TimeOutError)
 		},
+		errIgnore: true,
 	}
 }
 
 // Add job to task pool
 func (t *task) SetTimeOut(td time.Duration) {
 	t.timeout = td
+}
+
+/*
+true:    ignore err and return fastest results
+false:   return fastest no err results
+         if all err return task err
+*/
+func (t *task) SetErrIgnore(b bool) {
+	t.errIgnore = b
 }
 
 // Add job to task pool
@@ -96,18 +112,30 @@ func (t *task) Run(n ...int) (interface{}, error) {
 		return NilResq{}, nil
 	}
 	ret := make(chan export)
+	dones := 0
+	onceBody := func() {
+		ret <- t.export
+	}
 	for i := 0; i < jl; i++ {
 		go func(job func(context.Context) (interface{}, error)) {
 			itf, err := job(t.ctx)
-			ret <- export{
-				err: err,
-				itf: itf,
+			dones++
+			if err == nil || t.errIgnore {
+				t.export = export{
+					err: err,
+					itf: itf,
+				}
+				t.once.Do(onceBody)
+			} else if dones == jl {
+				t.export = export{
+					err: errors.New(TaskError),
+				}
+				t.once.Do(onceBody)
 			}
 		}(t.jobs[i])
 	}
 	select {
 	case r := <-ret:
-		fmt.Println(t.ctx.Done(), t.ctx.Err())
 		t.cancelFunc()
 		return r.itf, r.err
 	case <-time.After(t.timeout):
